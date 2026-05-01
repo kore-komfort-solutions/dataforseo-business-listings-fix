@@ -1,76 +1,153 @@
-# KKS Cold Prospect Reports — Project Setup Instructions
+# dataforseo-business-listings-fix
 
-## What this is
+The DataForSEO Business Listings Search API silently ignores the `location_name` parameter.
+Use `location_coordinate` instead. This repo documents the issue and provides working scripts.
 
-Four files that, when uploaded to a new Claude Project, give every future chat in that project full context without re-explaining or re-querying. This eliminates the need to re-paste your database schema, voice rules, report standards, or letter templates in every session.
+## The Problem
 
-## How to set up the Project
+`POST /v3/business_data/business_listings/search/live` accepts a `location_name` parameter
+in the request payload. The endpoint returns results without an error. But the location filter
+is not applied. The same query against six different cities returns the same 1,000 records.
 
-### Step 1 — Create the Project
-1. In Claude.ai, click "Projects" in the left sidebar.
-2. Click "Create project" (or the + icon).
-3. Name it: **KKS Cold Prospect Intel Reports**
-4. Description (optional): *Weekly cold-prospect Echelon Intelligence Reports for contractor home services market.*
+This is not in the DataForSEO documentation as a known limitation. The docs only show
+`location_coordinate` in their example payloads, but they do not flag `location_name` as
+unsupported. Developers who carry the `location_name` pattern from DataForSEO's other
+endpoints (SERP, Keywords Data, Backlinks, DataForSEO Labs) into Business Listings hit
+this silent failure.
 
-### Step 2 — Set the Project Instructions
-1. In the new project, click "Set custom instructions" or the equivalent settings link.
-2. Open the file `PROJECT_INSTRUCTIONS.md`.
-3. Copy the entire contents.
-4. Paste into the custom instructions field.
-5. Save.
+## The Fix
 
-### Step 3 — Upload the reference files
-1. In the project, click "Add content" or the + icon to add knowledge.
-2. Upload `KKS_DATABASE_SCHEMA.md`.
-3. Upload `ECHELON_REPORT_SPEC.md`.
-4. Upload `COVER_LETTER_TEMPLATE.md`.
-5. Optionally also upload the FFE example PDF (the v3 report at korekomfortsolutions.com) so future Claude can reference the canonical example directly.
+Use `location_coordinate` with format `"latitude,longitude,radius_in_km"`. Add a
+country code filter to keep international results out:
 
-### Step 4 — Verify the setup
-Start a new chat in the project. Ask: *"What do you know about my prospect database, report standards, and cover letter approach?"*
-
-Claude should answer without running any database queries. The schema, voice rules, report spec, and letter template should all be available from the project knowledge.
-
-## What this enables
-
-In every new chat in this project:
-- No more pasting the database schema
-- No more explaining the FFE report structure
-- No more reminding about em-dash rules, voice, ICP
-- No more re-explaining the cover letter framing
-- Direct work: "build the report for prospect 234" should be enough to get started
-
-## What still requires human input each time
-
-- Confirmation of which prospect IDs to work on
-- Approval of API spend (DataForSEO costs, etc.)
-- Final review of each report before printing
-- Address verification for mailings
-- Approval of cover letter personalization before printing
-- Anything that touches the live production database
-
-## File inventory in this directory
-
-```
-PROJECT_INSTRUCTIONS.md      <- Custom instructions for the Project
-KKS_DATABASE_SCHEMA.md       <- Database reference (no more .schema queries)
-ECHELON_REPORT_SPEC.md       <- Report structure, voice, quality gates (cold-prospect 14-18 page version)
-COVER_LETTER_TEMPLATE.md     <- Cover letter template + warm-followup variant + voice checklist
-README.md                    <- This file
+```json
+{
+  "categories": ["roofing_contractor"],
+  "description": "roofing contractor",
+  "location_coordinate": "29.7604,-95.3698,30",
+  "filters": [["address_info.country_code", "=", "US"]],
+  "limit": 1000,
+  "order_by": ["rating.value,desc"]
+}
 ```
 
-## Maintenance notes
+This returns roofing contractors within 30 km of Houston city center, US only.
 
-- Update `KKS_DATABASE_SCHEMA.md` whenever new tables are added or column meanings change.
-- Update `ECHELON_REPORT_SPEC.md` if the FFE example evolves or new sections are added based on what works in mailings.
-- Update `COVER_LETTER_TEMPLATE.md` if mailing tests show that different framings convert better.
-- Update `PROJECT_INSTRUCTIONS.md` if the workflow changes (e.g., switching shipping carriers, changing batch size, expanding to new cities).
-- The "Current state" section at the bottom of `PROJECT_INSTRUCTIONS.md` will go stale as you mail prospects. Plan to refresh it monthly OR remove the per-batch state and let chat context handle batch-specific details.
+## Before and After
 
-## After today's batch ships
+We were building a contractor database for Kore Komfort Solutions LLC. The same workflow,
+with one parameter name changed:
 
-Once you've mailed the first 11 prospects:
-1. Update prospect statuses in DB to `mailed`
-2. Track responses (calls, emails) in the `notes` field with date stamps
-3. After 30 days, evaluate response rate and update the cover letter / report templates if certain framings perform better
-4. Refresh the prospect pool query for next week's batch from the remaining `researched` prospects in working permit cities
+| Approach | Queries | Cost | Net-new records |
+|---|---|---|---|
+| `location_name` (broken) | 24 | ~$7 | 3 |
+| `location_coordinate` (working) | 200 | ~$4 | 3,772 |
+
+Same auth, same endpoint, same database, same dedup logic. The only difference is the
+geographic parameter.
+
+## Repository Contents
+
+```
+.
+├── README.md                  This file
+├── nightly_discover.sh        Main discovery script (working)
+├── seed_metros.py             Seeds top US metros into a SQLite markets table
+├── discover_batch.sh          Batch runner with budget cap
+└── examples/
+    ├── minimal.sh             Minimum viable working query
+    └── diagnostic.sh          Two-query diagnostic to confirm location filter is working
+```
+
+## Quick Start
+
+### 1. Set up DataForSEO credentials
+
+```bash
+mkdir -p ~/.openclaw/secrets
+cat > ~/.openclaw/secrets/dataforseo.env <<'EOF'
+DATAFORSEO_LOGIN=your-email@example.com
+DATAFORSEO_PASSWORD=your-api-password
+EOF
+chmod 600 ~/.openclaw/secrets/dataforseo.env
+```
+
+### 2. Run the diagnostic to confirm the fix on your account
+
+```bash
+./examples/diagnostic.sh
+```
+
+This runs two queries against the same coordinate to verify the API behaves as expected.
+
+### 3. Run a single discovery query
+
+```bash
+./nightly_discover.sh "Chicago" "IL" "roofing"
+```
+
+This requires a SQLite database at `~/.openclaw/kks.db` with a `markets` table seeded by
+`seed_metros.py` and a `prospects` table (schema is at the top of `nightly_discover.sh`).
+
+## Required Schema
+
+The `nightly_discover.sh` script writes to a `prospects` table with these columns at minimum:
+
+```sql
+CREATE TABLE prospects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  market_id INTEGER,
+  business_name TEXT NOT NULL,
+  website_url TEXT,
+  phone TEXT,
+  address TEXT,
+  zip TEXT,
+  city TEXT,
+  state TEXT,
+  trade_type TEXT,
+  status TEXT DEFAULT 'new',
+  google_reviews_count INTEGER,
+  source TEXT,
+  notes TEXT
+);
+```
+
+The `markets` table stores metro coordinates:
+
+```sql
+CREATE TABLE markets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  city TEXT,
+  state TEXT NOT NULL,
+  metro_area TEXT,
+  latitude REAL,
+  longitude REAL,
+  search_radius_km INTEGER
+);
+```
+
+## Pricing Notes
+
+DataForSEO charges roughly $0.01 per task plus $0.0003 per row returned. A query that
+returns 1,000 rows costs about $0.31. A query returning 50 rows costs about $0.025.
+
+## Why I Wrote This
+
+I am Mike Warner, founder of Kore Komfort Solutions LLC. I am building a contractor
+intelligence database used internally for our Echelon Intelligence Reports product.
+I spent roughly $8 figuring out this parameter name. The next person Googling "DataForSEO
+business listings same results different cities" should not have to spend that.
+
+The full writeup is at
+[korekomfortsolutions.com/blog/dataforseo-business-listings-location-name-bug-fix/](https://korekomfortsolutions.com/blog/dataforseo-business-listings-location-name-bug-fix/).
+
+## Disclaimers
+
+- Not affiliated with DataForSEO.
+- Behavior described is current as of May 2026. DataForSEO may update their API or docs;
+  if you find this is no longer accurate, please open an issue.
+- This repository contains no DataForSEO credentials. Bring your own.
+
+## License
+
+MIT. Use it however you want. Attribution appreciated but not required.
